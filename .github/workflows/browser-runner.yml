@@ -1,0 +1,178 @@
+name: Cloud browser runner
+
+# Free, cloud-only host for the browser runtime. No local machine, no paid
+# service, no platform API.
+#
+# A job starts the Playwright runtime, opens a Cloudflare quick tunnel and
+# publishes the URL as a repository variable (BROWSER_RUNTIME_URL), which the
+# dashboard reads. Encrypted browser sessions are carried between jobs with an
+# Actions artifact, because a runner has no durable disk.
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "How long to keep the cloud browser alive (5-350 minutes)"
+        required: true
+        default: "60"
+      purpose:
+        description: "Optional note for the run log"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: cloud-browser-runner
+  cancel-in-progress: false
+
+env:
+  SESSIONS_ARTIFACT: browser-sessions
+
+jobs:
+  runner:
+    name: Host the cloud browser
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: cloud-browser/pnpm-lock.yaml
+
+      - name: Install runtime
+        working-directory: cloud-browser
+        run: pnpm install --frozen-lockfile
+
+      - name: Build runtime
+        working-directory: cloud-browser
+        run: pnpm build
+
+      - name: Install Chromium
+        working-directory: cloud-browser
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Install cloudflared
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x /tmp/cloudflared
+          /tmp/cloudflared --version
+
+      - name: Restore encrypted sessions from the previous job
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/browser-data
+          URL="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$SESSIONS_ARTIFACT&per_page=20" \
+            --jq '[.artifacts[] | select(.expired == false)][0].archive_download_url' 2>/dev/null || true)"
+          if [ -z "$URL" ] || [ "$URL" = "null" ]; then
+            echo "no previous session artifact; starting fresh"
+            exit 0
+          fi
+          curl -fsSL -H "authorization: Bearer $GH_TOKEN" -o /tmp/sessions.zip "$URL"
+          unzip -o -q /tmp/sessions.zip -d /tmp/browser-data
+          echo "restored $(find /tmp/browser-data -type f | wc -l) session file(s)"
+
+      - name: Start cloud browser runtime
+        env:
+          BROWSER_AGENT_TOKEN: ${{ secrets.BROWSER_AGENT_TOKEN }}
+          BROWSER_AGENT_ENCRYPTION_KEY: ${{ secrets.BROWSER_AGENT_ENCRYPTION_KEY }}
+          DASHBOARD_URL: ${{ vars.APP_URL }}
+        run: |
+          set -euo pipefail
+          cd cloud-browser
+          nohup env \
+            BROWSER_AGENT_HOST=127.0.0.1 \
+            BROWSER_AGENT_PORT=8787 \
+            BROWSER_AGENT_DATA_DIR=/tmp/browser-data \
+            BROWSER_AGENT_HEADLESS=1 \
+            BROWSER_AGENT_TOKEN="$BROWSER_AGENT_TOKEN" \
+            BROWSER_AGENT_ENCRYPTION_KEY="$BROWSER_AGENT_ENCRYPTION_KEY" \
+            APP_URL="${DASHBOARD_URL:-https://arabic-consultant-growth-engine.vercel.app}" \
+            node dist/server.js > /tmp/runtime.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8787/health > /dev/null; then echo "runtime healthy"; break; fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8787/health
+
+      - name: Open public tunnel and publish it
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          MINUTES: ${{ inputs.minutes }}
+        run: |
+          set -euo pipefail
+          nohup /tmp/cloudflared tunnel --url http://127.0.0.1:8787 --no-autoupdate > /tmp/tunnel.log 2>&1 &
+          URL=""
+          for i in $(seq 1 60); do
+            URL="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/tunnel.log | head -n1 || true)"
+            [ -n "$URL" ] && break
+            sleep 2
+          done
+          if [ -z "$URL" ]; then echo "::error::tunnel did not start"; tail -40 /tmp/tunnel.log; exit 1; fi
+          EXPIRES="$(date -u -d "+${MINUTES} minutes" +%Y-%m-%dT%H:%M:%SZ)"
+          echo "TUNNEL_URL=$URL" >> "$GITHUB_ENV"
+          echo "EXPIRES_AT=$EXPIRES" >> "$GITHUB_ENV"
+          echo "REGISTERED_MINUTES=$MINUTES" >> "$GITHUB_ENV"
+          bash .github/scripts/publish-runtime-url.sh "$URL"
+          {
+            echo "### Cloud browser is live"
+            echo ""
+            echo "- Tunnel: $URL"
+            echo "- Expires: $EXPIRES ($MINUTES minutes)"
+            echo "- Dashboard: https://arabic-consultant-growth-engine.vercel.app/social"
+            echo "- Purpose: ${{ inputs.purpose }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the browser alive
+        if: env.TUNNEL_URL != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          end=$(( $(date +%s) + REGISTERED_MINUTES * 60 ))
+          heartbeat=0
+          while [ "$(date +%s)" -lt "$end" ]; do
+            sleep 30
+            if ! curl -fsS http://127.0.0.1:8787/health > /dev/null; then
+              echo "::error::runtime stopped unexpectedly"; tail -40 /tmp/runtime.log; exit 1
+            fi
+            heartbeat=$((heartbeat + 1))
+            if [ $((heartbeat % 20)) -eq 0 ]; then
+              echo "heartbeat $heartbeat: runtime healthy"
+            fi
+          done
+          echo "time budget used; shutting down"
+
+      - name: Persist encrypted sessions for the next job
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-sessions
+          path: /tmp/browser-data
+          if-no-files-found: ignore
+          retention-days: 30
+          overwrite: true
+
+      - name: Clear the published runtime
+        if: always()
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: bash .github/scripts/publish-runtime-url.sh "" || true
+
+      - name: Runner logs on failure
+        if: failure()
+        run: |
+          echo "--- runtime ---"; tail -60 /tmp/runtime.log || true
+          echo "--- tunnel ---"; tail -40 /tmp/tunnel.log || true

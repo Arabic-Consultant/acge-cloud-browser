@@ -1,0 +1,3 @@
+# pnpm 10 reads build-script approvals from the workspace file.
+onlyBuiltDependencies:
+  - esbuild

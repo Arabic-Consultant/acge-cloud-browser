@@ -1,0 +1,41 @@
+# Standalone deployment for the cloud browser runtime.
+# Runs the published image (built by .github/workflows/browser-image.yml) on any
+# persistent host with one command:
+#
+#   cp .env.browser.example .env      # fill BROWSER_AGENT_TOKEN / KEY / APP_URL
+#   docker compose -f cloud-browser/docker-compose.yml up -d
+#
+# Put HTTPS in front (Caddy/Nginx) and set BROWSER_AGENT_URL on Vercel to that
+# origin. Port 8787 is bound to localhost only; the dashboard never reaches it
+# directly from the browser.
+services:
+  cloud-browser:
+    image: ghcr.io/arabic-consultant/ai-growth-engine-cloud-browser:${BROWSER_IMAGE_TAG:-latest}
+    pull_policy: always
+    container_name: acge-cloud-browser
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      BROWSER_AGENT_TOKEN: ${BROWSER_AGENT_TOKEN:?Set BROWSER_AGENT_TOKEN}
+      BROWSER_AGENT_ENCRYPTION_KEY: ${BROWSER_AGENT_ENCRYPTION_KEY:?Set BROWSER_AGENT_ENCRYPTION_KEY}
+      APP_URL: ${APP_URL:?Set APP_URL to the Vercel dashboard origin}
+      BROWSER_AGENT_DATA_DIR: /data
+      BROWSER_AGENT_MAX_STEPS: ${BROWSER_AGENT_MAX_STEPS:-14}
+      BROWSER_AGENT_ACTION_COOLDOWN_MS: ${BROWSER_AGENT_ACTION_COOLDOWN_MS:-45000}
+      BROWSER_AGENT_ACTION_DAILY_LIMIT: ${BROWSER_AGENT_ACTION_DAILY_LIMIT:-20}
+      BROWSER_AGENT_ALLOW_LINKEDIN_ACTIONS: ${BROWSER_AGENT_ALLOW_LINKEDIN_ACTIONS:-0}
+    volumes:
+      - cloud_browser_data:/data
+    ports:
+      - "127.0.0.1:8787:8787"
+    shm_size: "1gb"
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  cloud_browser_data:
