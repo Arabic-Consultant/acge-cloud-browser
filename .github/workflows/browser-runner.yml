@@ -70,19 +70,24 @@ jobs:
             echo "browser download attempt $attempt failed; retrying in 15s"
             sleep 15
           done
-          # System libraries and Arabic fonts. The Ubuntu runner already ships
-          # Chrome's dependencies; apt DNS is flaky, so this is best-effort and
-          # must never block a healthy run.
+          # The Ubuntu runner already ships Chrome's system libraries. Only pay
+          # the apt cost when the browser genuinely cannot launch.
+          if node -e "const {chromium}=require('playwright');chromium.launch({args:['--no-sandbox']}).then(b=>b.close()).then(()=>process.exit(0)).catch(()=>process.exit(1))"; then
+            echo "chromium launches with the runner's existing libraries"
+            exit 0
+          fi
+          # Best-effort dependency install with hard timeouts so a DNS outage
+          # cannot strand the job.
           if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
             sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources || true
           fi
-          sudo apt-get update -o Acquire::Retries=5 || true
-          sudo apt-get install -y --no-install-recommends fonts-noto-core fonts-noto-color-emoji libnss3 libnspr4 libgbm1 libasound2t64 || true
-          # Prove the browser actually launches; only then install any missing deps.
-          if ! node -e "const {chromium}=require('playwright');chromium.launch({args:['--no-sandbox']}).then(b=>b.close()).catch(()=>process.exit(1))"; then
-            pnpm exec playwright install-deps chromium || true
-            node -e "const {chromium}=require('playwright');chromium.launch({args:['--no-sandbox']}).then(b=>b.close()).catch(()=>process.exit(1))"
+          timeout 90 sudo apt-get update -o Acquire::Retries=2 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 -o Acquire::ForceIPv4=true || true
+          timeout 150 sudo apt-get install -y --no-install-recommends fonts-noto-core fonts-noto-color-emoji libnss3 libnspr4 libgbm1 libasound2t64 || true
+          if node -e "const {chromium}=require('playwright');chromium.launch({args:['--no-sandbox']}).then(b=>b.close()).then(()=>process.exit(0)).catch(()=>process.exit(1))"; then
+            exit 0
           fi
+          pnpm exec playwright install-deps chromium || true
+          node -e "const {chromium}=require('playwright');chromium.launch({args:['--no-sandbox']}).then(b=>b.close()).then(()=>process.exit(0)).catch(()=>process.exit(1))"
       - name: Install cloudflared
         run: |
           set -euo pipefail
