@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import type { BrowserContext, Page } from "playwright";
 import { config } from "./config.js";
 import { exportState, goto, openContext, policyHosts } from "./browser.js";
-import { readText, screenshot } from "./extract.js";
+import { clickRef, readText, screenshot, snapshot, typeIntoRef, type PageSnapshot } from "./extract.js";
+import { AppLlmPlanner, PlannerUnavailableError, type AgentAction } from "./planner.js";
+import { policyFor } from "./policy.js";
 import { audit, accounts, type Account } from "./store.js";
 import { redact } from "./policy.js";
 
@@ -20,7 +22,10 @@ export type LiveInput =
   | { type: "type"; text: string }
   | { type: "key"; key: string }
   | { type: "goto"; url: string }
-  | { type: "scroll"; dy: number };
+  | { type: "scroll"; dy: number }
+  | { type: "back" }
+  | { type: "forward" }
+  | { type: "reload" };
 
 export class LiveSession {
   readonly id = `live_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
@@ -34,6 +39,7 @@ export class LiveSession {
   private closed = false;
   lastFrame: Extract<LiveEvent, { type: "frame" }> | null = null;
   private lastUrl = "";
+  private lastAiHistory: Array<{ action: string; result: string }> = [];
 
   private constructor(account: Account, context: BrowserContext, page: Page) {
     this.account = account;
@@ -78,7 +84,7 @@ export class LiveSession {
       if (this.closed) return;
       try {
         const [image, meta] = await Promise.all([
-          screenshot(this.page),
+          screenshot(this.page, config.liveFrameQuality),
           this.page.evaluate(() => ({ url: window.location.href, title: document.title.slice(0, 160) })),
         ]);
         const frame: Extract<LiveEvent, { type: "frame" }> = {
@@ -131,12 +137,89 @@ export class LiveSession {
       case "scroll":
         await this.page.mouse.wheel(0, Math.max(-4000, Math.min(4000, input.dy)));
         break;
+      case "back":
+        await this.page.goBack({ waitUntil: "domcontentloaded", timeout: 20_000 }).catch(() => undefined);
+        break;
+      case "forward":
+        await this.page.goForward({ waitUntil: "domcontentloaded", timeout: 20_000 }).catch(() => undefined);
+        break;
+      case "reload":
+        await this.page.reload({ waitUntil: "domcontentloaded", timeout: 20_000 }).catch(() => undefined);
+        break;
       default:
         throw new Error("unsupported_input");
     }
     await this.page.waitForTimeout(250);
     this.broadcast({ type: "input", at: new Date().toISOString(), action: input.type });
     return { ok: true, detail: input.type };
+  }
+
+  /**
+   * Takes one AI-planned step on the same live page the owner is watching, so
+   * the assistant can actually see and operate the session instead of a
+   * parallel hidden browser.
+   */
+  async aiStep(instruction: string): Promise<{ thought: string; action: AgentAction; result: string }> {
+    if (this.closed) throw new Error("live_session_closed");
+    this.lastActivity = Date.now();
+    const policy = policyFor(this.account.platform);
+    let current: PageSnapshot;
+    try {
+      current = await snapshot(this.page);
+    } catch {
+      current = { url: this.page.url(), title: "", text: "", elements: [], capturedAt: new Date().toISOString() };
+    }
+    const planner = new AppLlmPlanner();
+    let decision;
+    try {
+      decision = await planner.next({
+        goal: instruction,
+        step: 1,
+        maxSteps: 1,
+        platform: this.account.platform,
+        mode: "agent",
+        policy: { actionMode: policy.actionMode, actionNote: policy.actionNote, draftAllowed: policy.draftAllowed, label: policy.label },
+        snapshot: current,
+        history: this.lastAiHistory.slice(-8),
+      });
+    } catch (error) {
+      if (error instanceof PlannerUnavailableError) throw new Error(`planner_unavailable:${error.message}`);
+      throw error;
+    }
+
+    this.broadcast({ type: "notice", at: new Date().toISOString(), message: decision.thought || "خطوة وكيل" });
+    const result = await this.executeAiAction(decision.action, policyHosts(this.account));
+    this.lastAiHistory.push({ action: decision.action.kind, result });
+    await this.page.waitForTimeout(300);
+    return { thought: decision.thought, action: decision.action, result };
+  }
+
+  private async executeAiAction(action: AgentAction, allowedHosts: string[]): Promise<string> {
+    switch (action.kind) {
+      case "goto":
+        await goto(this.page, action.url, allowedHosts);
+        return "navigated";
+      case "click":
+        await clickRef(this.page, action.ref);
+        return "clicked";
+      case "type":
+        await typeIntoRef(this.page, action.ref, action.text, action.submit);
+        return "typed";
+      case "scroll":
+        await this.page.mouse.wheel(0, action.direction === "down" ? action.amount ?? 800 : -(action.amount ?? 800));
+        return "scrolled";
+      case "wait":
+        await this.page.waitForTimeout(action.ms);
+        return "waited";
+      case "read_page":
+        return (await readText(this.page)).slice(0, 4000);
+      case "finish":
+        return action.summary;
+      case "draft_action":
+        return "draft_requires_task_mode";
+      default:
+        return "unsupported";
+    }
   }
 
   async visibleText(): Promise<string> {

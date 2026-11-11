@@ -84,6 +84,9 @@ const inputSchema = z.union([
   z.object({ type: z.literal("key"), key: z.string().min(1).max(20) }),
   z.object({ type: z.literal("goto"), url: z.string().url().max(500) }),
   z.object({ type: z.literal("scroll"), dy: z.number().min(-4000).max(4000) }),
+  z.object({ type: z.literal("back") }),
+  z.object({ type: z.literal("forward") }),
+  z.object({ type: z.literal("reload") }),
 ]);
 
 const taskSchema = z.object({
@@ -209,7 +212,31 @@ const routes: Array<{ method: string; pattern: RegExp; handler: Handler }> = [
   },
   {
     method: "POST",
-    pattern: /^\/live\/([\w-]+)\/finish$/,
+    pattern: /^\/live\/([\w-]+)\/ai$/,
+    handler: async (request, response, [id]) => {
+      const session = liveSessions.get(id);
+      if (!session) return json(response, 404, { error: "live_session_not_found" });
+      const body = (await readBody(request)) as { instruction?: unknown };
+      if (typeof body.instruction !== "string" || body.instruction.trim().length < 3 || body.instruction.length > 600) {
+        return json(response, 400, { error: "instruction_required" });
+      }
+      try {
+        const result = await session.aiStep(body.instruction.trim());
+        json(response, 200, result);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "ai_step_failed";
+        json(response, message.startsWith("planner_unavailable") ? 503 : 500, {
+          error: "ai_step_failed",
+          message: message.startsWith("planner_unavailable")
+            ? "مزوّد الذكاء الاصطناعي غير مهيأ أو منتهي الحصة."
+            : message,
+        });
+      }
+    },
+  },
+  {
+    method: "POST",
+    pattern: /^\/live\/([\w-]+)\/finish$/, 
     handler: async (_request, response, [id]) => {
       const session = liveSessions.get(id);
       if (!session) return json(response, 404, { error: "live_session_not_found" });

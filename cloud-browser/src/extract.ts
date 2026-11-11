@@ -114,7 +114,16 @@ export async function readText(page: Page, limit = 12_000): Promise<string> {
 }
 
 export async function screenshot(page: Page, quality = 62): Promise<string> {
-  const buffer = await page.screenshot({ type: "jpeg", quality, fullPage: false, timeout: 10_000 });
+  const buffer = await page.screenshot({
+    type: "jpeg",
+    quality,
+    fullPage: false,
+    // Render at CSS pixel scale and skip animations; lower quality + smaller
+    // frames are the main levers for live-view latency.
+    scale: "css",
+    animations: "disabled",
+    timeout: 10_000,
+  });
   return buffer.toString("base64");
 }
 

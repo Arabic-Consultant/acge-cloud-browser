@@ -22,7 +22,13 @@ export const config = {
   /** Browser viewport used for both live view and agent runs. */
   viewport: { width: 1280, height: 800 },
   liveTtlMs: int("BROWSER_AGENT_LIVE_TTL_MS", 15 * 60_000, 60_000, 6 * 60 * 60_000),
-  liveFrameIntervalMs: int("BROWSER_AGENT_FRAME_INTERVAL_MS", 900, 250, 10_000),
+  /**
+   * Live view cadence. Lower interval + `optimizeForSpeed` screenshots keep the
+   * view responsive without flooding the tunnel with large frames.
+   */
+  liveFrameIntervalMs: int("BROWSER_AGENT_FRAME_INTERVAL_MS", 450, 200, 10_000),
+  /** JPEG quality for live frames (lower = faster/smaller). */
+  liveFrameQuality: int("BROWSER_AGENT_FRAME_QUALITY", 45, 20, 90),
   maxTaskSteps: int("BROWSER_AGENT_MAX_STEPS", 14, 1, 40),
   taskTimeoutMs: int("BROWSER_AGENT_TASK_TIMEOUT_MS", 6 * 60_000, 30_000, 30 * 60_000),
   /** Time an approved-action draft may stay open waiting for the owner. */
