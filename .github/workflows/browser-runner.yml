@@ -115,6 +115,7 @@ jobs:
         env:
           BROWSER_AGENT_TOKEN: ${{ secrets.BROWSER_AGENT_TOKEN }}
           BROWSER_AGENT_ENCRYPTION_KEY: ${{ secrets.BROWSER_AGENT_ENCRYPTION_KEY }}
+          BROWSER_AGENT_DASHBOARD_BYPASS: ${{ secrets.BROWSER_AGENT_DASHBOARD_BYPASS }}
           DASHBOARD_URL: ${{ vars.APP_URL }}
         run: |
           set -euo pipefail
@@ -126,7 +127,7 @@ jobs:
             BROWSER_AGENT_HEADLESS=1 \
             BROWSER_AGENT_TOKEN="$BROWSER_AGENT_TOKEN" \
             BROWSER_AGENT_ENCRYPTION_KEY="$BROWSER_AGENT_ENCRYPTION_KEY" \
-            APP_URL="${DASHBOARD_URL:-https://arabic-consultant-growth-engine.vercel.app}" \
+            BROWSER_AGENT_DASHBOARD_BYPASS="$BROWSER_AGENT_DASHBOARD_BYPASS" \n            APP_URL="${DASHBOARD_URL:-https://arabic-consultant-growth-engine.vercel.app}" \
             node dist/server.js > /tmp/runtime.log 2>&1 &
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:8787/health > /dev/null; then echo "runtime healthy"; break; fi
