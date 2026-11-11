@@ -61,18 +61,28 @@ jobs:
         working-directory: cloud-browser
         run: |
           set -euo pipefail
-          # GitHub runner DNS occasionally fails while apt fetches fonts; retry
-          # the whole install instead of failing an otherwise healthy run.
-          for attempt in 1 2 3 4; do
-            if pnpm exec playwright install --with-deps chromium; then
-              echo "chromium ready (attempt $attempt)"
-              exit 0
+          # Download the browser from the Playwright CDN (no apt involved).
+          for attempt in 1 2 3; do
+            if pnpm exec playwright install chromium; then
+              echo "chromium downloaded (attempt $attempt)"
+              break
             fi
-            echo "chromium install attempt $attempt failed; retrying in 20s"
-            sleep 20
+            echo "browser download attempt $attempt failed; retrying in 15s"
+            sleep 15
           done
-          exit 1
-
+          # System libraries and Arabic fonts. The Ubuntu runner already ships
+          # Chrome's dependencies; apt DNS is flaky, so this is best-effort and
+          # must never block a healthy run.
+          if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+            sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources || true
+          fi
+          sudo apt-get update -o Acquire::Retries=5 || true
+          sudo apt-get install -y --no-install-recommends fonts-noto-core fonts-noto-color-emoji libnss3 libnspr4 libgbm1 libasound2t64 || true
+          # Prove the browser actually launches; only then install any missing deps.
+          if ! node -e "const {chromium}=require('playwright');chromium.launch({args:['--no-sandbox']}).then(b=>b.close()).catch(()=>process.exit(1))"; then
+            pnpm exec playwright install-deps chromium || true
+            node -e "const {chromium}=require('playwright');chromium.launch({args:['--no-sandbox']}).then(b=>b.close()).catch(()=>process.exit(1))"
+          fi
       - name: Install cloudflared
         run: |
           set -euo pipefail
