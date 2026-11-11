@@ -59,7 +59,19 @@ jobs:
 
       - name: Install Chromium
         working-directory: cloud-browser
-        run: pnpm exec playwright install --with-deps chromium
+        run: |
+          set -euo pipefail
+          # GitHub runner DNS occasionally fails while apt fetches fonts; retry
+          # the whole install instead of failing an otherwise healthy run.
+          for attempt in 1 2 3 4; do
+            if pnpm exec playwright install --with-deps chromium; then
+              echo "chromium ready (attempt $attempt)"
+              exit 0
+            fi
+            echo "chromium install attempt $attempt failed; retrying in 20s"
+            sleep 20
+          done
+          exit 1
 
       - name: Install cloudflared
         run: |
