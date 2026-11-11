@@ -70,6 +70,7 @@ export class AppLlmPlanner implements Planner {
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.token}`,
+        ...(config.dashboardBypass ? { "x-vercel-protection-bypass": config.dashboardBypass } : {}),
       },
       body: JSON.stringify(input),
       signal: AbortSignal.timeout(45_000),

@@ -36,6 +36,8 @@ export const config = {
   /** Dashboard endpoint that supplies the next agent step from the configured AI provider. */
   appUrl: (process.env.APP_URL || "").replace(/\/$/, ""),
   plannerPath: "/api/browser/agent/step",
+  /** Vercel "Protection Bypass for Automation" secret for the dashboard origin. */
+  dashboardBypass: process.env.BROWSER_AGENT_DASHBOARD_BYPASS ?? "",
   /**
    * Push encrypted sessions to the dashboard over HTTP. Disabled by default: the
    * GitHub runner persists /data as an Actions artifact instead.

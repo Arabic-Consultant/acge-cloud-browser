@@ -106,6 +106,7 @@ const routes: Array<{ method: string; pattern: RegExp; handler: Handler }> = [
         version: VERSION,
         accounts: (await accounts.list()).length,
         plannerConfigured: Boolean(config.appUrl),
+        dashboardBypassConfigured: Boolean(config.dashboardBypass),
         concurrency: { liveSessions: "unbounded-by-token", tasks: config.maxTaskSteps },
       });
     },
@@ -230,6 +231,7 @@ const routes: Array<{ method: string; pattern: RegExp; handler: Handler }> = [
           message: message.startsWith("planner_unavailable")
             ? "مزوّد الذكاء الاصطناعي غير مهيأ أو منتهي الحصة."
             : message,
+          detail: message,
         });
       }
     },
