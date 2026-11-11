@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { BrowserContext, Page } from "playwright";
+import type { BrowserContext, CDPSession, Page } from "playwright";
 import { config } from "./config.js";
 import { exportState, goto, openContext, policyHosts } from "./browser.js";
 import { clickRef, readText, screenshot, snapshot, typeIntoRef, type PageSnapshot } from "./extract.js";
@@ -39,7 +39,11 @@ export class LiveSession {
   private closed = false;
   lastFrame: Extract<LiveEvent, { type: "frame" }> | null = null;
   private lastUrl = "";
+  private lastTitle = "";
   private lastAiHistory: Array<{ action: string; result: string }> = [];
+  private cdp: CDPSession | null = null;
+  private screencast = false;
+  private lastFrameSentAt = 0;
 
   private constructor(account: Account, context: BrowserContext, page: Page) {
     this.account = account;
@@ -66,7 +70,56 @@ export class LiveSession {
     this.subscribers.add(subscriber);
     this.lastActivity = Date.now();
     if (this.lastFrame) subscriber(this.lastFrame);
-    return () => this.subscribers.delete(subscriber);
+    void this.ensureScreencast();
+    return () => {
+      this.subscribers.delete(subscriber);
+      if (this.subscribers.size === 0) void this.stopScreencast();
+    };
+  }
+
+  /**
+   * Chrome DevTools screencast pushes frames as the page changes instead of
+   * polling screenshots. This is the difference between ~1 fps and a genuinely
+   * responsive live view.
+   */
+  private async ensureScreencast(): Promise<void> {
+    if (this.screencast || this.closed) return;
+    try {
+      if (!this.cdp) this.cdp = await this.context.newCDPSession(this.page);
+      if (!this.screencast) {
+        this.cdp.on("Page.screencastFrame", (event: { data: string; sessionId: number; metadata?: { deviceWidth?: number; deviceHeight?: number } }) => {
+          this.lastFrameSentAt = Date.now();
+          const frame: Extract<LiveEvent, { type: "frame" }> = {
+            type: "frame",
+            at: new Date().toISOString(),
+            url: redact(this.page.url(), 400),
+            title: this.lastTitle,
+            image: event.data,
+            width: event.metadata?.deviceWidth ?? config.viewport.width,
+            height: event.metadata?.deviceHeight ?? config.viewport.height,
+          };
+          this.lastFrame = frame;
+          this.broadcast(frame);
+          void this.cdp?.send("Page.screencastFrameAck", { sessionId: event.sessionId }).catch(() => undefined);
+        });
+        await this.cdp.send("Page.startScreencast", {
+          format: "jpeg",
+          quality: config.liveFrameQuality,
+          maxWidth: config.viewport.width,
+          maxHeight: config.viewport.height,
+          everyNthFrame: 1,
+        });
+        this.screencast = true;
+      }
+    } catch {
+      // Screencast is a Chromium feature; the polling fallback still runs.
+    }
+  }
+
+  private async stopScreencast(): Promise<void> {
+    if (!this.screencast || !this.cdp) return;
+    this.screencast = false;
+    await this.cdp.send("Page.stopScreencast").catch(() => undefined);
   }
 
   private broadcast(event: LiveEvent): void {
@@ -80,27 +133,32 @@ export class LiveSession {
   }
 
   private startLoop(): void {
+    // Meta/URL tracking + a safety fallback frame. The screencast provides the
+    // fast path; this loop only fills gaps for static pages or browsers where
+    // screencast is unavailable.
     const tick = async () => {
       if (this.closed) return;
       try {
-        const [image, meta] = await Promise.all([
-          screenshot(this.page, config.liveFrameQuality),
-          this.page.evaluate(() => ({ url: window.location.href, title: document.title.slice(0, 160) })),
-        ]);
-        const frame: Extract<LiveEvent, { type: "frame" }> = {
-          type: "frame",
-          at: new Date().toISOString(),
-          url: redact(meta.url, 400),
-          title: meta.title,
-          image,
-          width: config.viewport.width,
-          height: config.viewport.height,
-        };
-        this.lastFrame = frame;
-        this.broadcast(frame);
+        const meta = await this.page.evaluate(() => ({ url: window.location.href, title: document.title.slice(0, 160) }));
+        this.lastTitle = meta.title;
         if (meta.url !== this.lastUrl) {
           this.lastUrl = meta.url;
-          this.broadcast({ type: "meta", at: frame.at, url: redact(meta.url, 400), title: meta.title });
+          this.broadcast({ type: "meta", at: new Date().toISOString(), url: redact(meta.url, 400), title: meta.title });
+        }
+        if (this.subscribers.size > 0 && !this.screencast && Date.now() - this.lastFrameSentAt > 1500) {
+          const image = await screenshot(this.page, config.liveFrameQuality);
+          const frame: Extract<LiveEvent, { type: "frame" }> = {
+            type: "frame",
+            at: new Date().toISOString(),
+            url: redact(meta.url, 400),
+            title: meta.title,
+            image,
+            width: config.viewport.width,
+            height: config.viewport.height,
+          };
+          this.lastFrame = frame;
+          this.lastFrameSentAt = Date.now();
+          this.broadcast(frame);
         }
       } catch {
         // Transient capture failures are expected during navigation.
@@ -109,8 +167,7 @@ export class LiveSession {
         await this.close("idle_timeout");
         return;
       }
-      if (this.subscribers.size > 0) this.timer = setTimeout(tick, config.liveFrameIntervalMs);
-      else this.timer = setTimeout(tick, Math.max(2000, config.liveFrameIntervalMs * 3));
+      this.timer = setTimeout(tick, this.subscribers.size > 0 ? 1000 : Math.max(2000, config.liveFrameIntervalMs * 3));
     };
     this.timer = setTimeout(tick, 100);
   }
@@ -238,6 +295,8 @@ export class LiveSession {
     if (this.closed) return;
     this.closed = true;
     if (this.timer) clearTimeout(this.timer);
+    await this.stopScreencast();
+    await this.cdp?.detach().catch(() => undefined);
     try {
       const state = await exportState(this.context);
       await accounts.saveSessionState(this.account.id, state);
